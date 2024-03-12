@@ -1,3 +1,2 @@
 - add file browser also for the server when receiving a file
-- let the server remain active also when a file has been received
 - clean up the code

@@ -1,7 +1,7 @@
 #include <stdbool.h>
 
-bool show_hidden=true;
-bool prev_hidden=true;
+bool show_hidden=false;
+bool prev_hidden=false;
 bool quit=false;
 bool scan_dir=false;
 bool back=false;

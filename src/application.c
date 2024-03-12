@@ -27,15 +27,21 @@
  * \param num_shown_entries will be filled with the number of entries that are not hidden
 */
 void RecreateMenu(ITEM **items,struct dirent *entries,int *num_entries,int *num_shown_entries){
+    FILE *fp=fopen("debug.txt","w");
+    
     int j=0;
     for(int i=0;i<*num_entries;i++){
         if(entries[i].d_name[0]!='.'){
             items[j]=new_item(entries[i].d_name,"");
-            j++;
+            if(items[j]!=NULL){
+                j++;
+            }
         }
     }
     items[j]=NULL;
     *num_shown_entries=j;
+
+    fclose(fp);
 }
 
 /**
@@ -49,6 +55,9 @@ void RecreateHiddenMenu(ITEM **items,struct dirent *entries,int *num_entries,int
     int j=0;
     for(int i=0;i<*num_entries;i++){
         items[i]=new_item(entries[i].d_name,"");
+        if(items[i]!=NULL){
+            j++;
+        }
     }
     items[*num_entries]=NULL;
     *num_shown_entries=*num_entries;
@@ -230,12 +239,12 @@ void RunClient(){
     int num_shown_entries=0;
 
     ITEM **items=(ITEM **)calloc(num_entries+1,sizeof(ITEM *));
-    for(int i=0;i<num_entries;i++){
-        items[i]=new_item(entries[i].d_name,"");
-    }
-    items[num_entries]=NULL;
 
-    num_shown_entries=num_entries;
+    if(show_hidden){
+        RecreateHiddenMenu(items,entries,&num_entries,&num_shown_entries);
+    }else{
+        RecreateMenu(items,entries,&num_entries,&num_shown_entries);
+    }
 
     MENU *menu=CreateMenu(items,win);
     wrefresh(win);
@@ -272,15 +281,17 @@ void RunClient(){
             wrefresh(win);
         }else{
             if(scan_dir){ //directory was changed and the menu needs to be updated
-                struct dirent *selected_entry;
-                for(int i=0;i<num_entries;i++){
-                    if(item_name(current_item(menu))!=NULL && strcmp(item_name(current_item(menu)),entries[i].d_name)==0){
-                        selected_entry=&entries[i];
-                        break;
+                struct dirent *selected_entry=NULL;
+                if(!back){
+                    for(int i=0;i<num_entries;i++){
+                        if(item_name(current_item(menu))!=NULL && strcmp(item_name(current_item(menu)),entries[i].d_name)==0){
+                            selected_entry=&entries[i];
+                            break;
+                        }
                     }
                 }
 
-                if(selected_entry->d_type!=DT_DIR){
+                if(selected_entry!=NULL && selected_entry->d_type!=DT_DIR){
                     scan_dir=false;
                 }else if(back){ //go back to the previous directory
                     back=false;
@@ -384,7 +395,6 @@ void RunClient(){
 
                 prev_hidden=show_hidden;
                 menu=CreateMenu(items,win);
-                post_menu(menu);
             }
 
             for(int i=0;i<COLS-2;i++){
@@ -424,6 +434,7 @@ void RunServer(){
     //window for the menu
     win=newwin(LINES-2,COLS-2,1,1);
     keypad(win,true);
+    nodelay(win,false);
 
     char filename[PATH_MAX_SIZE];
 
@@ -451,99 +462,103 @@ void RunServer(){
     getsockname(sockfd,(struct sockaddr *)&addr,&addr_len);
     int port=ntohs(addr.sin_port);
 
-    wprintw(win,"Server interfaces: \n");
+    struct sockaddr_in client;
+    int client_size=sizeof(struct sockaddr_in);;
+    int client_sock;
+    int bytes_read;
+    char option;
+    int file;
+    int curx,cury;
+    char path[PATH_MAX_SIZE];
+    char buffer[512];
+    
     struct ifaddrs *addrs,*temp;
-
     getifaddrs(&addrs);
-    temp=addrs;
 
-    while(temp){
-        if(temp->ifa_addr && temp->ifa_addr->sa_family==AF_INET){
-            struct sockaddr_in *pAddr=(struct sockaddr_in*)temp->ifa_addr;
-            wprintw(win,"%s: %s\n",temp->ifa_name,inet_ntoa(pAddr->sin_addr));
+    while(!quit){
+        wprintw(win,"Server interfaces: \n");
+
+        temp=addrs;
+        while(temp){
+            if(temp->ifa_addr && temp->ifa_addr->sa_family==AF_INET){
+                struct sockaddr_in *pAddr=(struct sockaddr_in*)temp->ifa_addr;
+                wprintw(win,"%s: %s\n",temp->ifa_name,inet_ntoa(pAddr->sin_addr));
+            }
+            temp=temp->ifa_next;
         }
-        temp=temp->ifa_next;
+        wprintw(win,"Server is listening on port %d\n",port);
+        wrefresh(win);
+        
+        client_sock=accept(sockfd,(struct sockaddr *)&client,(socklen_t*)&client_size);
+
+        if(client_sock==-1){
+            endwin();
+            perror("Unable to accept connection");
+            return;
+        }
+
+        if((bytes_read=recv(client_sock,filename,PATH_MAX_SIZE,0))==-1){
+            endwin();
+            perror("Unable to receive file name");
+            return;
+        }else{  
+            filename[bytes_read]='\0';
+
+            wprintw(win,"Client wants to send %s. Accept(a) or reject(r)?\n",filename);
+            wrefresh(win);
+
+            do{
+                option=wgetch(win);
+                while(wgetch(win)!='\n');
+            }while(option!='a' && option!='r');
+
+            if(option=='r'){
+                if(send(client_sock,"REJ",3,0)==-1){
+                    endwin();
+                    perror("Unable to send file name confirmation");
+                    return;
+                }
+            }else{
+                if(send(client_sock,"ACC",3,0)==-1){
+                    endwin();
+                    perror("Unable to send file name confirmation");
+                    return;
+                }
+
+                wprintw(win,"Path to save the file: ");
+                wrefresh(win);
+                
+                file=0;
+
+                do{
+                    if(file<0){
+                        wprintw(win,"Error: %s\n",strerror(errno));
+                    }
+                    getyx(win,cury,curx);
+                    for(int i=curx;i<COLS-2;i++){
+                        mvwprintw(win,cury,i," ");
+                    }
+                    mvwgetnstr(win,cury,curx,path,PATH_MAX_SIZE);
+                }while((file=open(path,O_WRONLY | O_CREAT | O_TRUNC,0666))<0);
+
+                while((bytes_read=recv(client_sock,buffer,512,0))>0){
+                    if(write(file,buffer,bytes_read)==-1){
+                        endwin();
+                        perror("Unable to write to file");
+                        return;
+                    }
+                }
+
+                close(file);
+
+                wprintw(win,"File received correctly. Press a key to wait for another connection.");
+                wgetch(win);
+                wclear(win);
+            }
+        }
     }
 
     freeifaddrs(addrs);
-
-    wprintw(win,"Server is listening on port %d\n",port);
-
-    wrefresh(win);
-
-    struct sockaddr_in client;
-    int client_size=sizeof(struct sockaddr_in);
-    int client_sock=accept(sockfd,(struct sockaddr *)&client,(socklen_t*)&client_size);
-
-    if(client_sock==-1){
-        endwin();
-        perror("Unable to accept connection");
-        return;
-    }
-
-    int bytes_read;
-    if((bytes_read=recv(client_sock,filename,PATH_MAX_SIZE,0))==-1){
-        endwin();
-        perror("Unable to receive file name");
-        return;
-    }else{  
-        filename[bytes_read]='\0';
-
-        wprintw(win,"Client wants to send %s. Accept(a) or reject(r)?\n",filename);
-        wrefresh(win);
-
-        char option;
-        do{
-            option=wgetch(win);
-            while(wgetch(win)!='\n');
-        }while(option!='a' && option!='r');
-
-        if(option=='r'){
-            if(send(client_sock,"REJ",3,0)==-1){
-                endwin();
-                perror("Unable to send file name confirmation");
-                return;
-            }
-        }else{
-            if(send(client_sock,"ACC",3,0)==-1){
-                endwin();
-                perror("Unable to send file name confirmation");
-                return;
-            }
-
-            wprintw(win,"Path to save the file: ");
-            wrefresh(win);
-            
-            int file=0;
-            char path[PATH_MAX_SIZE];
-            int curx,cury;
-
-            do{
-                if(file<0){
-                    wprintw(win,"Error: %s\n",strerror(errno));
-                }
-                getyx(win,cury,curx);
-                for(int i=curx;i<COLS-2;i++){
-                    mvwprintw(win,cury,i," ");
-                }
-                mvwgetnstr(win,cury,curx,path,PATH_MAX_SIZE);
-            }while((file=open(path,O_WRONLY | O_CREAT | O_TRUNC,0666))<0);
-
-            char buffer[512];
-
-            int bytes_read;
-            while((bytes_read=recv(client_sock,buffer,512,0))>0){
-                if(write(file,buffer,bytes_read)==-1){
-                    endwin();
-                    perror("Unable to write to file");
-                    return;
-                }
-            }
-
-            close(file);
-        }
-    }
-
 
     delwin(win);
     endwin();
