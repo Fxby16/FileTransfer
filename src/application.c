@@ -114,13 +114,13 @@ void GetEntries(DIR *dir,struct dirent **entries,int *num_entries,int *entries_s
         (*num_entries)++;
         if(*num_entries>*entries_size){
             (*entries_size)++;
-            entries=realloc(entries,(*num_entries)*sizeof(struct dirent));
+            *entries=realloc(*entries,(*num_entries)*sizeof(struct dirent));
         }
 
         if(entries==NULL){
             endwin();
             perror("Unable to allocate memory");
-            return NULL;
+            return;
         }
 
         memcpy(&((*entries)[(*num_entries)-1]),entry,sizeof(struct dirent));
@@ -412,7 +412,7 @@ void SendMenu(char *filepath,WINDOW *win){
     close(file);
     close(sockfd);
 
-    wprintw(win,"File sent\n");
+    wprintw(win,"File sent. Press any key to continue\n");
     wrefresh(win);
     wgetch(win);
 }
@@ -651,7 +651,7 @@ void RunServer(){
     int client_size=sizeof(struct sockaddr_in);;
     int client_sock;
     int bytes_read;
-    char option;
+    char option[2];
     int file;
     int curx,cury;
     char path[PATH_MAX_SIZE];
@@ -692,25 +692,29 @@ void RunServer(){
             wprintw(win,"Client wants to send %s. Accept(a) or reject(r)?\n",filename);
             wrefresh(win);
 
+            cury=getcury(win);
             do{
-                option=wgetch(win);
-                while(wgetch(win)!='\n');
-            }while(option!='a' && option!='r'); //wait for the user to accept or reject the file
+                for(int i=0;i<COLS-2;i++){
+                    mvwprintw(win,cury,i," ");
+                }
+                mvwgetnstr(win,cury,0,option,1);
+            }while(option[0]!='a' && option[0]!='r'); //wait for the user to accept or reject the file
 
-            if(option=='r'){ //reject the file
+            if(option[0]=='r'){ //reject the file
                 if(send(client_sock,"REJ",3,0)==-1){
                     endwin();
                     perror("Unable to send file name confirmation");
                     return;
                 }
-            }else{ //accept the file
+                wclear(win);
+            }else if(option[0]=='a'){ //accept the file
                 if(send(client_sock,"ACC",3,0)==-1){
                     endwin();
                     perror("Unable to send file name confirmation");
                     return;
                 }
 
-                char *selected_folder=SelectFolderMenu(win); //let the user choose the directory where he wants to save the file
+                char *selected_folder=SelectDirectoryMenu(win); //let the user choose the directory where he wants to save the file
                 nodelay(win,false);
                 
                 if(selected_folder!=NULL){
