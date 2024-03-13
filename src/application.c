@@ -27,8 +27,6 @@
  * \param num_shown_entries will be filled with the number of entries that are not hidden
 */
 void RecreateMenu(ITEM **items,struct dirent *entries,int *num_entries,int *num_shown_entries){
-    FILE *fp=fopen("debug.txt","w");
-    
     int j=0;
     for(int i=0;i<*num_entries;i++){
         if(entries[i].d_name[0]!='.'){
@@ -40,8 +38,6 @@ void RecreateMenu(ITEM **items,struct dirent *entries,int *num_entries,int *num_
     }
     items[j]=NULL;
     *num_shown_entries=j;
-
-    fclose(fp);
 }
 
 /**
@@ -61,6 +57,237 @@ void RecreateHiddenMenu(ITEM **items,struct dirent *entries,int *num_entries,int
     }
     items[*num_entries]=NULL;
     *num_shown_entries=*num_entries;
+}
+
+/**
+ * Reallocate the items in the array and fill it with the entries that are not hidden and are directories
+ * \param items an array of pointers to items. the old pointers must already be freed
+ * \param entries an array containing the entries of the current directory
+ * \param num_entries the number of entries in the current directory
+ * \param num_shown_entries will be filled with the number of entries that are not hidden
+*/
+void RecreateFolderMenu(ITEM **items,struct dirent *entries,int *num_entries,int *num_shown_entries){
+    int j=0;
+    for(int i=0;i<*num_entries;i++){
+        if(entries[i].d_name[0]!='.' && entries[i].d_type==DT_DIR){
+            items[j]=new_item(entries[i].d_name,"");
+            if(items[j]!=NULL){
+                j++;
+            }
+        }
+    }
+    items[j]=NULL;
+    *num_shown_entries=j;
+}
+
+/**
+ * Reallocate the items in the array and fill it with all the entries in the current directory that are directories
+ * \param items an array of pointers to items. the old pointers must already be freed
+ * \param entries an array containing the entries of the current directory
+ * \param num_entries the number of entries in the current directory
+ * \param num_shown_entries will be filled with the number of entries in the current directory
+*/
+void RecreateFolderMenuHidden(ITEM **items,struct dirent *entries,int *num_entries,int *num_shown_entries){
+    int j=0;
+    for(int i=0;i<*num_entries;i++){
+        if(entries[i].d_type==DT_DIR){
+            items[j]=new_item(entries[i].d_name,"");
+            if(items[j]!=NULL){
+                j++;
+            }
+        }
+    }
+    items[j]=NULL;
+    *num_shown_entries=j;
+}
+
+/**
+ * Fill entries with all the entries in dir
+ * \param dir the directory to scan
+ * \param entries a pointer to the pointer of the first element of the array (might be NULL)
+*/
+void GetEntries(DIR *dir,struct dirent **entries,int *num_entries,int *entries_size){
+    *num_entries=0;
+    
+    struct dirent *entry;
+    while((entry=readdir(dir))!=NULL){
+        (*num_entries)++;
+        if(*num_entries>*entries_size){
+            (*entries_size)++;
+            entries=realloc(entries,(*num_entries)*sizeof(struct dirent));
+        }
+
+        if(entries==NULL){
+            endwin();
+            perror("Unable to allocate memory");
+            return NULL;
+        }
+
+        memcpy(&((*entries)[(*num_entries)-1]),entry,sizeof(struct dirent));
+    }
+}
+
+/**
+ * Menu used by the receiver to choose the directory where he wants to save the file
+*/
+char *SelectDirectoryMenu(WINDOW *win){
+    nodelay(win,true);
+    wclear(win);
+
+    DIR *dir=opendir("."); //open current directory
+
+    if(dir==NULL) {
+        endwin();
+        perror("Unable to open directory");
+        return NULL;
+    }
+
+    struct dirent *entries=NULL;
+    int entries_size=0;
+    int num_entries=0;
+
+    GetEntries(dir,&entries,&num_entries,&entries_size);
+    SortEntries(entries,num_entries);
+
+    char current_path[PATH_MAX_SIZE];
+
+    char *cwd=getcwd(NULL,0); //get current working directory
+    strcpy(current_path,cwd);
+    free(cwd);
+
+    int num_shown_entries=0;
+
+    ITEM **items=(ITEM **)calloc(num_entries+1,sizeof(ITEM *));
+
+    if(show_hidden){
+        RecreateFolderMenuHidden(items,entries,&num_entries,&num_shown_entries);
+    }else{
+        RecreateFolderMenu(items,entries,&num_entries,&num_shown_entries);
+    }
+
+    MENU *menu=CreateMenu(items,win);
+    wrefresh(win);
+
+    while(!quit){
+        HandleInputs(win,menu);
+
+        if(send_menu){ //the user selected a directory (name inherited from the sender's menu)
+            send_menu=false;
+            
+            char *selected_folder=malloc(strlen(current_path)+1);
+            strcpy(selected_folder,current_path);
+
+            unpost_menu(menu);
+            wclear(win);
+            wrefresh(win);
+
+            for(int i=0;i<num_shown_entries;i++){
+                free_item(items[i]);
+            }
+            free_menu(menu);
+            free(items);
+
+            nodelay(win,false);
+            return selected_folder;
+        }else{
+            if(scan_dir){ //directory was changed and the menu needs to be updated
+                struct dirent *selected_entry=NULL;
+                if(!back){ //if the user didn't go back to the previous directory
+                    for(int i=0;i<num_entries;i++){
+                        if(item_name(current_item(menu))!=NULL && strcmp(item_name(current_item(menu)),entries[i].d_name)==0){
+                            selected_entry=&entries[i];
+                            break;
+                        }
+                    }
+                }
+
+                if(selected_entry!=NULL && selected_entry->d_type!=DT_DIR){ //if the user selected a file
+                    scan_dir=false;
+                }else if(back){ //go back to the previous directory
+                    back=false;
+
+                    char *last_slash=strrchr(current_path,'/'); //remove the last directory from the path
+                    if(last_slash!=current_path){
+                        *last_slash='\0';
+                    }
+
+                    num_entries=0;
+                    closedir(dir);
+                    dir=opendir(current_path);
+
+                    GetEntries(dir,&entries,&num_entries,&entries_size);
+                    SortEntries(entries,num_entries);
+                }else{ //go to the selected directory
+                    if(strlen(current_path)+strlen(item_name(current_item(menu))+1)>PATH_MAX_SIZE){
+                        endwin();
+                        perror("Path too long");
+                        return NULL;   
+                    }
+
+                    if(strcmp(item_name(current_item(menu)),".")!=0){ //the selected directory starts with a dot
+                        if(strcmp(item_name(current_item(menu)),"..")==0){ //the selected directory is the parent directory, go back
+                            char *last_slash=strrchr(current_path,'/');
+                            if(last_slash!=current_path){
+                                *last_slash='\0';
+                            }
+                        }else{ //the selected directory is a normal directory, add it to the path
+                            strcat(current_path,"/");
+                            strcat(current_path,item_name(current_item(menu)));
+                        }
+
+                        num_entries=0;
+                        closedir(dir);
+                        if((dir=opendir(current_path))==NULL){
+                            endwin();
+                            perror("Unable to open directory");
+                            printf("%s\n",current_path);
+                            printf("Selected entry: %s\n",selected_entry->d_name);
+                            return NULL;
+                        }
+
+                        GetEntries(dir,&entries,&num_entries,&entries_size);
+                        SortEntries(entries,num_entries);
+                    }
+                }
+            }
+
+            if(prev_hidden!=show_hidden || scan_dir){ //the menu needs to be updated
+                unpost_menu(menu);
+                free_menu(menu);
+                for(int i=0;i<num_shown_entries;i++){
+                    free_item(items[i]);
+                }
+
+                if((items=(ITEM **)realloc(items,(num_entries+1)*sizeof(ITEM *)))==NULL){
+                    endwin();
+                    perror("Unable to allocate memory");
+                    return NULL;
+                }
+
+                if(show_hidden){
+                    RecreateFolderMenuHidden(items,entries,&num_entries,&num_shown_entries);
+                }else{
+                    RecreateFolderMenu(items,entries,&num_entries,&num_shown_entries);
+                }
+
+                if(scan_dir)
+                    scan_dir=false;
+
+                prev_hidden=show_hidden;
+                menu=CreateMenu(items,win);
+            }
+
+            for(int i=0;i<COLS-2;i++){
+                mvwprintw(win,0,i," ");
+            }
+            mvwprintw(win,0,0,"Entries in %s:",current_path);
+
+            wrefresh(win);
+        }
+        usleep(64000);
+    }
+
+    return NULL;
 }
 
 /**
@@ -146,13 +373,13 @@ void SendMenu(char *filepath,WINDOW *win){
         filename[i-start_index]=filepath[i];
     }
 
-    if(send(sockfd,filename,strlen(filename),0)==-1){
+    if(send(sockfd,filename,strlen(filename),0)==-1){ //send the name of the file
         perror("Unable to send file name");
         close(sockfd);
         return;
     }
 
-    if(recv(sockfd,buffer,512,0)==-1){
+    if(recv(sockfd,buffer,512,0)==-1){ //receive the confirmation from the receiver
         perror("Unable to receive file name confirmation");
         close(sockfd);
         return;
@@ -184,6 +411,10 @@ void SendMenu(char *filepath,WINDOW *win){
 
     close(file);
     close(sockfd);
+
+    wprintw(win,"File sent\n");
+    wrefresh(win);
+    wgetch(win);
 }
 
 void RunClient(){
@@ -212,31 +443,17 @@ void RunClient(){
     }
 
     struct dirent *entries=NULL;
+    struct dirent *selected_entry;
     int entries_size=0;
     int num_entries=0;
+    int num_shown_entries=0;
 
-    struct dirent *entry;
-    while((entry=readdir(dir))!=NULL){
-        num_entries++;
-        entries_size++;
-        entries=realloc(entries,num_entries*sizeof(struct dirent));
-
-        if(entries==NULL){
-            endwin();
-            perror("Unable to allocate memory");
-            return;
-        }
-
-        memcpy(&entries[num_entries-1],entry,sizeof(struct dirent));
-    }
-
+    GetEntries(dir,&entries,&num_entries,&entries_size);
     SortEntries(entries,num_entries);
 
-    char *cwd=getcwd(NULL,0);
+    char *cwd=getcwd(NULL,0); //get current working directory
     strcpy(current_path,cwd);
     free(cwd);
-
-    int num_shown_entries=0;
 
     ITEM **items=(ITEM **)calloc(num_entries+1,sizeof(ITEM *));
 
@@ -252,9 +469,9 @@ void RunClient(){
     while(!quit){
         HandleInputs(win,menu);
 
-        if(send_menu){
+        if(send_menu){ //the user selected a file
             send_menu=false;
-            struct dirent *selected_entry;
+            selected_entry=NULL;
             for(int i=0;i<num_entries;i++){
                 if(strcmp(item_name(current_item(menu)),entries[i].d_name)==0){
                     selected_entry=&entries[i];
@@ -262,7 +479,7 @@ void RunClient(){
                 }
             }
 
-            if(selected_entry->d_type!=DT_DIR){
+            if(selected_entry->d_type!=DT_DIR){ //if the selected entry is a file send it
                 char *filepath=malloc(strlen(current_path)+strlen(selected_entry->d_name)+2);
                 strcpy(filepath,current_path);
                 strcat(filepath,"/");
@@ -281,7 +498,7 @@ void RunClient(){
             wrefresh(win);
         }else{
             if(scan_dir){ //directory was changed and the menu needs to be updated
-                struct dirent *selected_entry=NULL;
+                selected_entry=NULL;
                 if(!back){
                     for(int i=0;i<num_entries;i++){
                         if(item_name(current_item(menu))!=NULL && strcmp(item_name(current_item(menu)),entries[i].d_name)==0){
@@ -291,12 +508,12 @@ void RunClient(){
                     }
                 }
 
-                if(selected_entry!=NULL && selected_entry->d_type!=DT_DIR){
+                if(selected_entry!=NULL && selected_entry->d_type!=DT_DIR){ //if the user selected a file
                     scan_dir=false;
                 }else if(back){ //go back to the previous directory
                     back=false;
 
-                    char *last_slash=strrchr(current_path,'/');
+                    char *last_slash=strrchr(current_path,'/'); //remove the last directory from the path
                     if(last_slash!=current_path){
                         *last_slash='\0';
                     }
@@ -305,22 +522,7 @@ void RunClient(){
                     closedir(dir);
                     dir=opendir(current_path);
 
-                    while((entry=readdir(dir))!=NULL){
-                        num_entries++;
-                        if(num_entries>entries_size){
-                            entries=realloc(entries,num_entries*sizeof(struct dirent));
-                            entries_size++;
-                        }
-
-                        if(entries==NULL){
-                            endwin();
-                            perror("Unable to allocate memory");
-                            return;
-                        }
-
-                        memcpy(&entries[num_entries-1],entry,sizeof(struct dirent));
-                    }
-
+                    GetEntries(dir,&entries,&num_entries,&entries_size);
                     SortEntries(entries,num_entries);
                 }else{ //go to the selected directory
                     if(strlen(current_path)+strlen(item_name(current_item(menu))+1)>PATH_MAX_SIZE){
@@ -329,13 +531,13 @@ void RunClient(){
                         return;   
                     }
 
-                    if(strcmp(item_name(current_item(menu)),".")!=0){
-                        if(strcmp(item_name(current_item(menu)),"..")==0){
+                    if(strcmp(item_name(current_item(menu)),".")!=0){ //the selected directory starts with a dot
+                        if(strcmp(item_name(current_item(menu)),"..")==0){ //the selected directory is the parent directory, go back
                             char *last_slash=strrchr(current_path,'/');
                             if(last_slash!=current_path){
                                 *last_slash='\0';
                             }
-                        }else{
+                        }else{ //the selected directory is a normal directory, add it to the path
                             strcat(current_path,"/");
                             strcat(current_path,item_name(current_item(menu)));
                         }
@@ -350,28 +552,13 @@ void RunClient(){
                             return;
                         }
 
-                        while((entry=readdir(dir))!=NULL){
-                            num_entries++;
-                            if(num_entries>entries_size){
-                                entries=realloc(entries,num_entries*sizeof(struct dirent));
-                                entries_size++;
-                            }
-
-                            if(entries==NULL){
-                                endwin();
-                                perror("Unable to allocate memory");
-                                return;
-                            }
-
-                            memcpy(&entries[num_entries-1],entry,sizeof(struct dirent));
-                        }
-
+                        GetEntries(dir,&entries,&num_entries,&entries_size);
                         SortEntries(entries,num_entries);
                     }
                 }
             }
 
-            if(prev_hidden!=show_hidden || scan_dir){
+            if(prev_hidden!=show_hidden || scan_dir){ //the menu needs to be updated
                 unpost_menu(menu);
                 free_menu(menu);
                 for(int i=0;i<num_shown_entries;i++){
@@ -414,8 +601,6 @@ void RunClient(){
     free_menu(menu);
     free(items);
 
-    closedir(dir);
-
     delwin(win);
 
     endwin();
@@ -451,7 +636,7 @@ void RunServer(){
         return;
     }
 
-    if(listen(sockfd,1)==-1){
+    if(listen(sockfd,1)==-1){ //listen for a maximum of 1 connection
         endwin();
         perror("Unable to listen to the socket");
         return;
@@ -460,7 +645,7 @@ void RunServer(){
     struct sockaddr_in addr;
     socklen_t addr_len=sizeof(addr);
     getsockname(sockfd,(struct sockaddr *)&addr,&addr_len);
-    int port=ntohs(addr.sin_port);
+    int port=ntohs(addr.sin_port); //get the port the server is listening on
 
     struct sockaddr_in client;
     int client_size=sizeof(struct sockaddr_in);;
@@ -473,13 +658,13 @@ void RunServer(){
     char buffer[512];
     
     struct ifaddrs *addrs,*temp;
-    getifaddrs(&addrs);
+    getifaddrs(&addrs); //get the server's interfaces
 
     while(!quit){
         wprintw(win,"Server interfaces: \n");
 
         temp=addrs;
-        while(temp){
+        while(temp){ //print the server's interfaces
             if(temp->ifa_addr && temp->ifa_addr->sa_family==AF_INET){
                 struct sockaddr_in *pAddr=(struct sockaddr_in*)temp->ifa_addr;
                 wprintw(win,"%s: %s\n",temp->ifa_name,inet_ntoa(pAddr->sin_addr));
@@ -489,7 +674,7 @@ void RunServer(){
         wprintw(win,"Server is listening on port %d\n",port);
         wrefresh(win);
         
-        client_sock=accept(sockfd,(struct sockaddr *)&client,(socklen_t*)&client_size);
+        client_sock=accept(sockfd,(struct sockaddr *)&client,(socklen_t*)&client_size); //accept a connection
 
         if(client_sock==-1){
             endwin();
@@ -497,7 +682,7 @@ void RunServer(){
             return;
         }
 
-        if((bytes_read=recv(client_sock,filename,PATH_MAX_SIZE,0))==-1){
+        if((bytes_read=recv(client_sock,filename,PATH_MAX_SIZE,0))==-1){ //receive the name of the file
             endwin();
             perror("Unable to receive file name");
             return;
@@ -510,50 +695,66 @@ void RunServer(){
             do{
                 option=wgetch(win);
                 while(wgetch(win)!='\n');
-            }while(option!='a' && option!='r');
+            }while(option!='a' && option!='r'); //wait for the user to accept or reject the file
 
-            if(option=='r'){
+            if(option=='r'){ //reject the file
                 if(send(client_sock,"REJ",3,0)==-1){
                     endwin();
                     perror("Unable to send file name confirmation");
                     return;
                 }
-            }else{
+            }else{ //accept the file
                 if(send(client_sock,"ACC",3,0)==-1){
                     endwin();
                     perror("Unable to send file name confirmation");
                     return;
                 }
 
-                wprintw(win,"Path to save the file: ");
-                wrefresh(win);
+                char *selected_folder=SelectFolderMenu(win); //let the user choose the directory where he wants to save the file
+                nodelay(win,false);
                 
-                file=0;
+                if(selected_folder!=NULL){
+                    wprintw(win,"Path to save the file: %s/",selected_folder);
+                    wrefresh(win);
+                    
+                    file=0;
 
-                do{
-                    if(file<0){
-                        wprintw(win,"Error: %s\n",strerror(errno));
-                    }
-                    getyx(win,cury,curx);
-                    for(int i=curx;i<COLS-2;i++){
-                        mvwprintw(win,cury,i," ");
-                    }
-                    mvwgetnstr(win,cury,curx,path,PATH_MAX_SIZE);
-                }while((file=open(path,O_WRONLY | O_CREAT | O_TRUNC,0666))<0);
+                    do{
+                        if(file<0){
+                            wprintw(win,"Error: %s\n",strerror(errno));
+                        }
+                        getyx(win,cury,curx);
+                        for(int i=curx;i<COLS-2;i++){
+                            mvwprintw(win,cury,i," ");
+                        }
+                        mvwgetnstr(win,cury,curx,filename,PATH_MAX_SIZE); //get the name of the file
+                        strcpy(path,selected_folder);
+                        if(path[strlen(path)-1]!='/'){
+                            strcat(path,"/");
+                        }
+                        strcat(path,filename); //append the name of the file to the path
+                    }while((file=open(path,O_WRONLY | O_CREAT | O_TRUNC,0666))<0); //try to open the file
 
-                while((bytes_read=recv(client_sock,buffer,512,0))>0){
-                    if(write(file,buffer,bytes_read)==-1){
-                        endwin();
-                        perror("Unable to write to file");
-                        return;
+                    while((bytes_read=recv(client_sock,buffer,512,0))>0){ //receive the file
+                        if(write(file,buffer,bytes_read)==-1){
+                            endwin();
+                            perror("Unable to write to file");
+                            return;
+                        }
                     }
+
+                    close(file);
+
+                    free(selected_folder);
+
+                    wprintw(win,"File received correctly. Press a key to wait for another connection.");
+                    wgetch(win);
+                    wclear(win);
+                }else{
+                    wprintw(win,"File not received correctly. Press a key to wait for another connection.");
+                    wgetch(win);
+                    wclear(win); 
                 }
-
-                close(file);
-
-                wprintw(win,"File received correctly. Press a key to wait for another connection.");
-                wgetch(win);
-                wclear(win);
             }
         }
     }
