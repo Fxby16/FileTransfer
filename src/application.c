@@ -373,23 +373,40 @@ void SendMenu(char *filepath,WINDOW *win){
         filename[i-start_index]=filepath[i];
     }
 
-    if(send(sockfd,filename,strlen(filename),0)==-1){ //send the name of the file
+    if(send(sockfd,filename,strlen(filename)+1,0)==-1){ //send the name of the file
         perror("Unable to send file name");
         close(sockfd);
         return;
     }
 
-    if(recv(sockfd,buffer,512,0)==-1){ //receive the confirmation from the receiver
-        perror("Unable to receive file name confirmation");
+    long file_size=GetFileSize(filepath);
+    char file_size_str[20];
+    sprintf(file_size_str,"%ld",file_size);
+
+    if(send(sockfd,file_size_str,strlen(file_size_str)+1,0)==-1){ //send the size of the file
+        perror("Unable to send file size");
         close(sockfd);
         return;
-    }else if(strcmp(buffer,"REJ")==0){
+    }
+
+    int bytes_read;
+    if((bytes_read=recv(sockfd,buffer,512,0))==-1){ //receive the confirmation from the receiver
+        perror("Unable to receive file confirmation");
+        close(sockfd);
+        return;
+    }
+
+    buffer[bytes_read]='\0';
+
+    if(strcmp(buffer,"REJ")==0){
         wprintw(win,"Receiver rejected the file. Press any key to continue.\n");
         wrefresh(win);
         wgetch(win);
         close(sockfd);
         return;
     }
+
+    assert(strcmp(buffer,"ACC")==0);
 
     int file=open(filepath,O_RDONLY);
 
@@ -399,7 +416,11 @@ void SendMenu(char *filepath,WINDOW *win){
         return;
     }
 
-    int bytes_read;
+    long bytes_sent=0;
+    long progress;
+
+    int cury=getcury(win);
+
     while((bytes_read=read(file,buffer,512))>0){
         if(send(sockfd,buffer,bytes_read,0)==-1){
             perror("Unable to send file");
@@ -407,12 +428,31 @@ void SendMenu(char *filepath,WINDOW *win){
             close(sockfd);
             return;
         }
+
+        bytes_sent+=bytes_read;
+        progress=(int)((double)bytes_sent/file_size*100);
+
+        mvwprintw(win,cury,0,"[");
+        for(int i=1;i<COLS-3;i++){
+            if(i<progress*(COLS-3)/100){
+                mvwprintw(win,cury,i,"=");
+            }else{
+                mvwprintw(win,cury,i," ");
+            }
+        }
+        mvwprintw(win,cury,COLS-3,"]",progress);  
+
+        for(int i=0;i<COLS-2;i++){
+            mvwprintw(win,cury+1,i," ");
+        }
+        mvwprintw(win,cury+1,0,"Sent %ld/%ld bytes (%ld%%)",bytes_sent,file_size,progress);
+        wrefresh(win);    
     }
 
     close(file);
     close(sockfd);
 
-    wprintw(win,"File sent. Press any key to continue\n");
+    wprintw(win,"\nFile sent. Press any key to continue\n");
     wrefresh(win);
     wgetch(win);
 }
@@ -682,83 +722,154 @@ void RunServer(){
             return;
         }
 
-        if((bytes_read=recv(client_sock,filename,PATH_MAX_SIZE,0))==-1){ //receive the name of the file
-            endwin();
-            perror("Unable to receive file name");
-            return;
-        }else{  
-            filename[bytes_read]='\0';
+        bool keep_receiving=true;
+        bool filename_received=false;
+        bool file_size_received=false;
 
-            wprintw(win,"Client wants to send %s. Accept(a) or reject(r)?\n",filename);
-            wrefresh(win);
+        char *file_size_str=malloc(20);
 
-            cury=getcury(win);
-            do{
-                for(int i=0;i<COLS-2;i++){
-                    mvwprintw(win,cury,i," ");
+        while(keep_receiving){
+            if((bytes_read=recv(client_sock,buffer,PATH_MAX_SIZE,0))==-1){
+                endwin();
+                perror("Unable to receive file name");
+                return;
+            }
+
+            int i=0;
+            if(!filename_received){
+                for(;i<bytes_read;i++){
+                    if(buffer[i]=='\0'){
+                        filename_received=true;
+                        filename[i]='\0';
+                        i++;
+                        break;
+                    }
+                    filename[i]=buffer[i];
                 }
-                mvwgetnstr(win,cury,0,option,1);
-            }while(option[0]!='a' && option[0]!='r'); //wait for the user to accept or reject the file
+            }
 
-            if(option[0]=='r'){ //reject the file
-                if(send(client_sock,"REJ",3,0)==-1){
-                    endwin();
-                    perror("Unable to send file name confirmation");
-                    return;
+            if(!file_size_received){
+                int j=0;
+                for(;i<bytes_read;i++,j++){
+                    if(buffer[i]=='\0'){
+                        file_size_received=true;
+                        file_size_str[j]='\0';
+                        break;
+                    }
+                    file_size_str[j]=buffer[i];
                 }
-                wclear(win);
-            }else if(option[0]=='a'){ //accept the file
-                if(send(client_sock,"ACC",3,0)==-1){
-                    endwin();
-                    perror("Unable to send file name confirmation");
-                    return;
-                }
+            }
 
-                char *selected_folder=SelectDirectoryMenu(win); //let the user choose the directory where he wants to save the file
-                nodelay(win,false);
+            if(filename_received && file_size_received){
+                keep_receiving=false;
+            }
+        }
+
+        long file_size=atol(file_size_str);
+        free(file_size_str);
+
+        if(file_size<0){
+            file_size_str=strdup("Unknown size");
+        }else{
+            file_size_str=GetSizeAsStr(file_size);
+        }
+
+        wprintw(win,"Client wants to send %s (%s). Accept(a) or reject(r)?\n",filename,file_size_str);
+        wrefresh(win);
+
+        free(file_size_str);
+
+        cury=getcury(win);
+        do{
+            for(int i=0;i<COLS-2;i++){
+                mvwprintw(win,cury,i," ");
+            }
+            mvwgetnstr(win,cury,0,option,1);
+        }while(option[0]!='a' && option[0]!='r'); //wait for the user to accept or reject the file
+
+        if(option[0]=='r'){ //reject the file
+            if(send(client_sock,"REJ",3,0)==-1){
+                endwin();
+                perror("Unable to send file name confirmation");
+                return;
+            }
+            wclear(win);
+        }else if(option[0]=='a'){ //accept the file
+            if(send(client_sock,"ACC",3,0)==-1){
+                endwin();
+                perror("Unable to send file name confirmation");
+                return;
+            }
+
+            char *selected_folder=SelectDirectoryMenu(win); //let the user choose the directory where he wants to save the file
+            nodelay(win,false);
+            
+            if(selected_folder!=NULL){
+                wprintw(win,"Original file name: %s\n",filename);
+                wprintw(win,"Path to save the file: %s/",selected_folder);
+                wrefresh(win);
                 
-                if(selected_folder!=NULL){
-                    wprintw(win,"Path to save the file: %s/",selected_folder);
-                    wrefresh(win);
-                    
-                    file=0;
+                file=0;
 
-                    do{
-                        if(file<0){
-                            wprintw(win,"Error: %s\n",strerror(errno));
-                        }
-                        getyx(win,cury,curx);
-                        for(int i=curx;i<COLS-2;i++){
-                            mvwprintw(win,cury,i," ");
-                        }
-                        mvwgetnstr(win,cury,curx,filename,PATH_MAX_SIZE); //get the name of the file
-                        strcpy(path,selected_folder);
-                        if(path[strlen(path)-1]!='/'){
-                            strcat(path,"/");
-                        }
-                        strcat(path,filename); //append the name of the file to the path
-                    }while((file=open(path,O_WRONLY | O_CREAT | O_TRUNC,0666))<0); //try to open the file
+                do{
+                    if(file<0){
+                        wprintw(win,"Error: %s\n",strerror(errno));
+                    }
+                    getyx(win,cury,curx);
+                    for(int i=curx;i<COLS-2;i++){
+                        mvwprintw(win,cury,i," ");
+                    }
+                    mvwgetnstr(win,cury,curx,filename,PATH_MAX_SIZE); //get the name of the file
+                    strcpy(path,selected_folder);
+                    if(path[strlen(path)-1]!='/'){
+                        strcat(path,"/");
+                    }
+                    strcat(path,filename); //append the name of the file to the path
+                }while((file=open(path,O_WRONLY | O_CREAT | O_TRUNC,0666))<0); //try to open the file
 
-                    while((bytes_read=recv(client_sock,buffer,512,0))>0){ //receive the file
-                        if(write(file,buffer,bytes_read)==-1){
-                            endwin();
-                            perror("Unable to write to file");
-                            return;
-                        }
+                long progress;
+                long bytes_received=0;
+
+                cury=getcury(win);
+
+                while((bytes_read=recv(client_sock,buffer,512,0))>0){ //receive the file
+                    if(write(file,buffer,bytes_read)==-1){
+                        endwin();
+                        perror("Unable to write to file");
+                        return;
                     }
 
-                    close(file);
+                    bytes_received+=bytes_read;
+                    progress=(int)((double)bytes_received/file_size*100);
 
-                    free(selected_folder);
+                    mvwprintw(win,cury,0,"[");
+                    for(int i=1;i<COLS-3;i++){
+                        if(i<progress*(COLS-3)/100){
+                            mvwprintw(win,cury,i,"=");
+                        }else{
+                            mvwprintw(win,cury,i," ");
+                        }
+                    }
+                    mvwprintw(win,cury,COLS-3,"]",progress);  
 
-                    wprintw(win,"File received correctly. Press a key to wait for another connection.");
-                    wgetch(win);
-                    wclear(win);
-                }else{
-                    wprintw(win,"File not received correctly. Press a key to wait for another connection.");
-                    wgetch(win);
-                    wclear(win); 
+                    for(int i=0;i<COLS-2;i++){
+                        mvwprintw(win,cury+1,i," ");
+                    }
+                    mvwprintw(win,cury+1,0,"Received %ld/%ld bytes (%ld%%)",bytes_received,file_size,progress);
+                    wrefresh(win);    
                 }
+
+                close(file);
+
+                free(selected_folder);
+
+                wprintw(win,"\nFile received correctly. Press a key to wait for another connection.");
+                wgetch(win);
+                wclear(win);
+            }else{
+                wprintw(win,"File not received correctly. Press a key to wait for another connection.");
+                wgetch(win);
+                wclear(win); 
             }
         }
     }

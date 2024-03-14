@@ -3,6 +3,7 @@
 #include <ncurses.h>
 #include <menu.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include <globals.h>
 #include <ctype.h>
@@ -89,4 +90,25 @@ uint32_t GetIp(char *ip_address){
     }
 
     return ip;
+}
+
+long GetFileSize(const char *filename){
+    struct stat st;
+    stat(filename,&st);
+    return st.st_size;
+}
+
+char *GetSizeAsStr(long size){
+    char *size_str=malloc(20);
+    if(size<1024){
+        sprintf(size_str,"%ld B",size);
+    }else if(size<1048576){
+        sprintf(size_str,"%.2f KB",(float)size/1024);
+    }else if(size<1073741824){
+        sprintf(size_str,"%.2f MB",(float)size/1048576);
+    }else{
+        sprintf(size_str,"%.2f GB",(float)size/1073741824);
+    }
+
+    return size_str;
 }
