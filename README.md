@@ -9,9 +9,11 @@ Easily send and receive files using TCP.
 
 ## Keys
 - `LEFT ARROW`: go to the parent directory
+- `UP ARROW`,`DOWN ARROW`: navigate the menu
 - `ENTER`: enter the directory
 - `s`: select current directory (server), send current file (client)
 - `h`: toggle hidden files 
+- `q`: quit (client)
 
 ## License
 This project is licensed under the [MIT License](LICENSE).
